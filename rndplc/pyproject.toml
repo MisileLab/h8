@@ -1,7 +1,3 @@
-[build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "retnet-mlx"
 version = "0.1.0"
@@ -9,14 +5,18 @@ description = "RetNet-style multi-scale retention in MLX"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-
 dependencies = [
-  "mlx",
-  "numpy",
-  "tqdm",
-  "pytest",
-  "matplotlib>=3.10.8",
+    "mlx==0.30.1",
+    "numpy==2.2.6; python_full_version < '3.11'",
+    "numpy==2.4.1; python_full_version >= '3.11'", 
+    "tqdm==4.67.1",
+    "pytest==9.0.2",
+    "matplotlib==3.10.8",
 ]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
