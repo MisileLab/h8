@@ -1,0 +1,8 @@
+representation_modes: ["trained_student", "random_projection", "pca"]
+rep_dims: [32, 64, 128, 256]
+query_n: 2000
+k_values: [10, 100]
+select:
+  target_recall_at_10: 0.4
+  strict_target_recall_at_10: 0.99
+  use_strict: false

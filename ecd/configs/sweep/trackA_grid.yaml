@@ -1,0 +1,3 @@
+steps: [5000, 20000, 50000]
+lr_schedule: [constant, cosine]
+warmup_steps: [0, 500, 1000]

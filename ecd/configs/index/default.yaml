@@ -1,0 +1,8 @@
+backend: "hnsw"
+metric: "cosine"
+force_normalize: true
+m: 16
+ef_construction: 200
+ef_search: 64
+use_two_stage: false
+candidate_n: 200

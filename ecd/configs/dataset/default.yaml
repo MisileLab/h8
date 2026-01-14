@@ -1,0 +1,9 @@
+run_id: "default"
+name: "chaehoyu/wikipedia-22-12-ko-embeddings-100k"
+split: "train"
+text_fields: ["title", "text"]
+embedding_fields_priority: ["embedding_json", "embedding", "embeddings", "vector"]
+max_rows: null
+teacher_topk: 100
+metric: "cosine"
+cache_dir: "results/${run_id}/cache"

@@ -1,0 +1,48 @@
+seed: 42
+device: "auto"
+train:
+  steps: 5000
+  batch_size: 256
+  lr: 1.0e-3
+  weight_decay: 0.0
+  lr_schedule: "constant"
+  warmup_steps: 0
+  amp: "none"
+  resume_path: null
+  log_every: 100
+  eval_every: 500
+  save_every: 500
+  save_every_steps: null
+  eval_every_steps: null
+  hard_negative:
+    enabled: true
+    mode: "teacher_tail"
+    tail_from: 10
+    tail_to: 100
+    mix_random_ratio: 0.5
+  rank:
+    kind: "info_nce"
+    multi_positive:
+      enabled: true
+      num_positives: 4
+loss:
+  distill: true
+  distill_mode: "cosine"
+  rank: true
+  struct: true
+  rank_temperature: 0.07
+  alpha: 1.0
+  beta: 0.5
+  gamma: 0.5
+  warmup_frac: 0.3
+eval:
+  query_n: 2000
+  k_values: [10, 100]
+  backend: "hnsw"
+  metric: "cosine"
+  force_normalize: true
+  use_two_stage: false
+  candidate_n: 200
+  m: 16
+  ef_construction: 200
+  ef_search: 64

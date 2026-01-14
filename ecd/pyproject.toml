@@ -1,0 +1,34 @@
+[project]
+name = "embedding-compression-db"
+version = "0.1.0"
+description = "Neighbor-preserving embedding compression experiments"
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Sisyphus"}]
+
+dependencies = [
+  "torch>=2.1.0",
+  "datasets>=2.18.0",
+  "omegaconf>=2.3.0",
+  "numpy>=1.26.0",
+  "polars>=0.20.0",
+  "matplotlib>=3.8.0",
+  "hnswlib>=0.8.0",
+  "scikit-learn>=1.4.0",
+  "tqdm>=4.66.0",
+  "qdrant-client>=1.8.0",
+  "psycopg[binary]>=3.1.18",
+]
+
+[build-system]
+requires = ["setuptools>=69.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

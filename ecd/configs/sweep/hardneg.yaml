@@ -1,0 +1,29 @@
+parent_run_id: null
+base:
+  dataset_config: "configs/dataset/default.yaml"
+  model_config: "configs/model/default.yaml"
+  train_config: "configs/train/default.yaml"
+  index_config: "configs/index/default.yaml"
+sweep:
+  mix_random_ratio: [0.0, 0.2, 0.5]
+  tail_to: [50, 100]
+  tail_from: 10
+  steps: [5000]
+  multi_positive: [false, true]
+  num_positives: [4]
+search:
+  two_stage: false
+  quick_steps: 3000
+  refine_steps: 10000
+  top_k: 2
+eval:
+  query_n: 2000
+  k_values: [10]
+  backend: "hnsw"
+  metric: "cosine"
+  force_normalize: true
+  use_two_stage: false
+  candidate_n: 200
+  m: 16
+  ef_construction: 200
+  ef_search: 64

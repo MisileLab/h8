@@ -1,4 +1,0 @@
-In the beginning, retention remembers.
-RetNet keeps time with decay and memory.
-Small data, small model, steady steps.
-Hello world. Hello retention.

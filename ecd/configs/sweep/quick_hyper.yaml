@@ -1,0 +1,28 @@
+sweep:
+  seed: 42
+  steps: 5000
+  validation_queries: 2000
+  backend: "hnsw"
+  metric: "cosine"
+  grid:
+    mix_random_ratio: [0.5, 0.2]
+    tail_to: [100, 50]
+    num_positives: [4, 8]
+  fixed:
+    hard_negative:
+      enabled: true
+      mode: "teacher_tail"
+      tail_from: 10
+    multi_positive:
+      enabled: true
+  eval:
+    k: 10
+    measure_latency: true
+    latency_queries: 200
+    latency_repeats: 3
+  output:
+    save_plots: true
+base:
+  dataset_config: "configs/dataset/default.yaml"
+  model_config: "configs/model/default.yaml"
+  train_config: "configs/train/default.yaml"
