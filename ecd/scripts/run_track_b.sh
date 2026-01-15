@@ -283,13 +283,14 @@ main() {
         echo "  --force, -f       Force rerun all experiments (skip existing=false)"
         echo "  --help, -h        Show this help message"
         echo ""
-        echo "Experiments (run in sequence):"
+        echo "Experiments (run in PARALLEL by default):"
         echo "  1) Sanity check: check_trackb_sanity.py (if exists)"
-        echo "  2) Core run 1: 20k steps, seed0"
-        echo "  3) Core run 2: 20k steps, seeds 0,1,2"
-        echo "  4) Core run 3: 50k steps, seeds 0,1,2"
-        echo "  5) Tuning A: 20k steps, seed0, tau=0.05"
-        echo "  6) Tuning B: 20k steps, seed0, tau=0.10"
+        echo "  2-6) All 5 experiments run simultaneously:"
+        echo "     - core_20k_seed0: 20k steps, seed0, tau=0.07"
+        echo "     - core_20k_seeds012: 20k steps, seeds 0,1,2, tau=0.07"
+        echo "     - core_50k_seeds012: 50k steps, seeds 0,1,2, tau=0.07"
+        echo "     - tuning_tau0.05: 20k steps, seed0, tau=0.05"
+        echo "     - tuning_tau0.10: 20k steps, seed0, tau=0.10"
         echo ""
         echo "Output files:"
         echo "  summary.csv  - Machine-readable summary of all runs"
@@ -310,11 +311,13 @@ main() {
         echo "  WARMUP_STEPS=2000"
         echo "  AMP=none"
         echo ""
-        echo "Batch size environment variable:"
+        echo "Batch size and parallelism:"
         echo "  BATCH_SIZE=8192        Default (fast iterations, ~10 it/s)"
+        echo "  PARALLEL_JOBS=5        Run 5 experiments in parallel (default)"
         echo ""
         echo "Example:"
-        echo "  AMP=bf16 bash scripts/run_track_b.sh  # Uses batch=8192, queue=12M"
+        echo "  AMP=bf16 bash scripts/run_track_b.sh                    # 5 parallel, batch=8192"
+        echo "  PARALLEL_JOBS=3 AMP=bf16 bash scripts/run_track_b.sh   # 3 parallel"
         exit 0
         ;;
     esac
@@ -365,27 +368,66 @@ main() {
   results_file="$(mktemp)"
   trap "rm -f $results_file" EXIT
 
-  local result
+  local parallel_jobs="${PARALLEL_JOBS:-5}"  # Run 5 experiments in parallel by default
+  log "Running up to $parallel_jobs experiments in parallel..."
+  log ""
 
-  result="$(run_experiment "core_20k_seed0" "$base_steps" "0" "0.07")"
-  IFS='|' read -r run_id status recall10 ndcg10 <<< "$result"
-  echo "$run_id|$status|$recall10|$ndcg10|core_20k_seed0|$base_steps|0|0.0005|2000|0.07|50|1024|32768|threshold|0.8" >> "$results_file"
+  # Define all experiments
+  local -a experiments=(
+    "core_20k_seed0|$base_steps|0|0.07"
+    "core_20k_seeds012|$base_steps|0,1,2|0.07"
+    "core_50k_seeds012|$long_steps|0,1,2|0.07"
+    "tuning_tau0.05|$base_steps|0|0.05"
+    "tuning_tau0.10|$base_steps|0|0.10"
+  )
 
-  result="$(run_experiment "core_20k_seeds012" "$base_steps" "0,1,2" "0.07")"
-  IFS='|' read -r run_id status recall10 ndcg10 <<< "$result"
-  echo "$run_id|$status|$recall10|$ndcg10|core_20k_seeds012|$base_steps|0,1,2|0.0005|2000|0.07|50|1024|32768|threshold|0.8" >> "$results_file"
+  # Temp files for parallel results
+  local -a result_files=()
+  local -a pids=()
 
-  result="$(run_experiment "core_50k_seeds012" "$long_steps" "0,1,2" "0.07")"
-  IFS='|' read -r run_id status recall10 ndcg10 <<< "$result"
-  echo "$run_id|$status|$recall10|$ndcg10|core_50k_seeds012|$long_steps|0,1,2|0.0005|2000|0.07|50|1024|32768|threshold|0.8" >> "$results_file"
+  for exp_spec in "${experiments[@]}"; do
+    IFS='|' read -r exp_name steps seeds tau <<< "$exp_spec"
+    
+    # Create temp file for this experiment's result
+    local result_file
+    result_file="$(mktemp)"
+    result_files+=("$result_file")
+    
+    # Run experiment in background
+    (
+      result="$(run_experiment "$exp_name" "$steps" "$seeds" "$tau")"
+      echo "$result|$exp_name|$steps|$seeds|0.0005|2000|$tau|50|4096|12582912|threshold|0.8" > "$result_file"
+    ) &
+    pids+=($!)
+    
+    log "Started: $exp_name (PID: ${pids[-1]})"
+  done
 
-  result="$(run_experiment "tuning_tau0.05" "$base_steps" "0" "0.05")"
-  IFS='|' read -r run_id status recall10 ndcg10 <<< "$result"
-  echo "$run_id|$status|$recall10|$ndcg10|tuning_tau0.05|$base_steps|0|0.0005|2000|0.05|50|1024|32768|threshold|0.8" >> "$results_file"
+  log ""
+  log "Waiting for all $parallel_jobs experiments to complete..."
+  log ""
 
-  result="$(run_experiment "tuning_tau0.10" "$base_steps" "0" "0.10")"
-  IFS='|' read -r run_id status recall10 ndcg10 <<< "$result"
-  echo "$run_id|$status|$recall10|$ndcg10|tuning_tau0.10|$base_steps|0|0.0005|2000|0.10|50|1024|32768|threshold|0.8" >> "$results_file"
+  # Wait for all background jobs
+  local failed=0
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      log "✓ Experiment $((i+1))/${#pids[@]} completed"
+    else
+      log "✗ Experiment $((i+1))/${#pids[@]} failed"
+      ((failed++))
+    fi
+  done
+
+  # Collect results
+  for result_file in "${result_files[@]}"; do
+    if [[ -f "$result_file" ]]; then
+      cat "$result_file" >> "$results_file"
+      rm -f "$result_file"
+    fi
+  done
+
+  log ""
+  log "All experiments finished ($failed failed)"
 
   log ""
   log "[FINAL] Writing summaries..."
