@@ -167,8 +167,7 @@ DEFAULT_CONFIG="configs/sweep/quick_hyper.yaml"
 : "${TAIL_TO:=50}"
 : "${NUM_POSITIVES:=8}"
 : "${BS:=}"
-: "${BATCH_SIZE:=${BS}}"
-: "${MAX_BATCH_SIZE:=}"
+: "${BATCH_SIZE:=${BS:-65536}}"  # Start large, auto-reduces on OOM
 
 : "${TRACK_B_ENABLE:=false}"
 : "${TRACK_B_TAU:=0.07}"
@@ -235,8 +234,7 @@ cp -f "$CONFIG" "${CONFIGS_DIR}/selected_config.yaml"
   echo "  MIX_RANDOM=$MIX_RANDOM"
   echo "  TAIL_TO=$TAIL_TO"
   echo "  NUM_POSITIVES=$NUM_POSITIVES"
-  echo "  BATCH_SIZE=${BATCH_SIZE:-<unset>}"
-  echo "  MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-<unset>}"
+  echo "  BATCH_SIZE=${BATCH_SIZE:-65536} (auto-reduces on OOM)"
   echo "  TRACK_B_ENABLE=$TRACK_B_ENABLE"
   echo "  TRACK_B_TAU=$TRACK_B_TAU"
   echo "  TRACK_B_K=$TRACK_B_K"
@@ -271,12 +269,7 @@ build_sweep_overrides() {
   ovs+=("--override" "sweep.grid.tail_to=[${TAIL_TO}]")
   ovs+=("--override" "sweep.grid.num_positives=[${NUM_POSITIVES}]")
 
-  if [[ -n "${BATCH_SIZE}" ]]; then
-    ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
-  fi
-  if [[ -n "${MAX_BATCH_SIZE}" ]]; then
-    ovs+=("--override" "train.dynamic_batch.max_batch_size=${MAX_BATCH_SIZE}")
-  fi
+  ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
 
   if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
     ovs+=("--override" "sweep.track_b.enable=true")
@@ -317,12 +310,7 @@ build_sweepA_overrides_for_grid() {
   ovs+=("--override" "sweep.grid.tail_to=[${TAIL_TO}]")
   ovs+=("--override" "sweep.grid.num_positives=[${NUM_POSITIVES}]")
 
-  if [[ -n "${BATCH_SIZE}" ]]; then
-    ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
-  fi
-  if [[ -n "${MAX_BATCH_SIZE}" ]]; then
-    ovs+=("--override" "train.dynamic_batch.max_batch_size=${MAX_BATCH_SIZE}")
-  fi
+  ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
 
   if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
     ovs+=("--override" "sweep.track_b.enable=true")
@@ -352,12 +340,7 @@ build_single_overrides() {
   ovs+=("--override" "train.save_every_steps=${SAVE_EVERY}")
   ovs+=("--override" "train.eval_every_steps=${EVAL_EVERY}")
 
-  if [[ -n "${BATCH_SIZE}" ]]; then
-    ovs+=("--override" "train.batch_size=${BATCH_SIZE}")
-  fi
-  if [[ -n "${MAX_BATCH_SIZE}" ]]; then
-    ovs+=("--override" "train.dynamic_batch.max_batch_size=${MAX_BATCH_SIZE}")
-  fi
+  ovs+=("--override" "train.batch_size=${BATCH_SIZE}")
 
   ovs+=("--override" "train.hard_negative.mix_random_ratio=${MIX_RANDOM}")
   ovs+=("--override" "train.hard_negative.tail_to=${TAIL_TO}")

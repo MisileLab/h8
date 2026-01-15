@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import gc
 import os
-import warnings
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, TypeVar
+from typing import Optional
 
 import torch
-
-T = TypeVar("T")
 
 
 @dataclass
@@ -244,19 +241,17 @@ def estimate_encode_batch_size(
 
 @dataclass
 class DynamicBatchConfig:
-    """Configuration for dynamic batch sizing."""
+    """Configuration for dynamic batch sizing.
+    
+    Strategy: Start with a large batch size and reduce on OOM until stable.
+    This finds the maximum usable batch size automatically.
+    """
 
     enabled: bool = True
-    initial_batch_size: Optional[int] = None  # None = auto-estimate
-    min_batch_size: int = 16
-    max_batch_size: int = 4096
-    memory_fraction: float = 0.95  # Target fraction of VRAM to use (aggressive)
-    oom_retry_enabled: bool = True
+    initial_batch_size: int = 65536  # Start large, will reduce on OOM
+    min_batch_size: int = 16  # Won't go below this
     oom_reduction_factor: float = 0.7  # Reduce batch by this factor on OOM
-    max_oom_retries: int = 5
-    warmup_steps: int = 10  # Steps to stabilize before increasing batch size
-    growth_factor: float = 1.1  # Factor to grow batch size if memory allows
-    growth_check_interval: int = 50  # Check for growth every N steps
+    max_oom_retries: int = 10  # Max retries before giving up
 
 
 def estimate_training_batch_size(
@@ -398,57 +393,23 @@ def is_oom_error(error: Exception) -> bool:
 class DynamicBatchSizer:
     """Manages dynamic batch sizing with OOM retry logic.
 
-    This class tracks memory usage and adjusts batch size dynamically:
-    - Automatically reduces batch size on OOM errors
-    - Gradually increases batch size when memory allows
-    - Tracks successful batch sizes for stability
+    Strategy: Start with a large batch size and reduce on OOM until stable.
+    This finds the maximum usable batch size automatically without gradual growth.
     """
 
     def __init__(
         self,
         config: DynamicBatchConfig,
         device: torch.device,
-        embedding_dim: int,
-        output_dim: int,
-        num_positives: int = 4,
-        num_negatives: int = 5,
-        track_b_enabled: bool = False,
-        track_b_k_pos: int = 50,
-        track_b_m_neg: int = 1024,
-        amp_mode: str = "none",
     ) -> None:
         self.config = config
         self.device = device
-        self.embedding_dim = embedding_dim
-        self.output_dim = output_dim
-        self.amp_mode = amp_mode
 
-        # Initialize batch size
-        if config.initial_batch_size is not None:
-            self._current_batch_size = config.initial_batch_size
-        elif config.enabled:
-            self._current_batch_size = estimate_training_batch_size(
-                embedding_dim=embedding_dim,
-                output_dim=output_dim,
-                num_positives=num_positives,
-                num_negatives=num_negatives,
-                device=device,
-                track_b_enabled=track_b_enabled,
-                track_b_k_pos=track_b_k_pos,
-                track_b_m_neg=track_b_m_neg,
-                amp_mode=amp_mode,
-                memory_fraction=config.memory_fraction,
-                min_batch=config.min_batch_size,
-                max_batch=config.max_batch_size,
-            )
-        else:
-            self._current_batch_size = config.max_batch_size
-
-        self._consecutive_successes = 0
+        # Start with large initial batch size
+        self._current_batch_size = config.initial_batch_size
         self._oom_count = 0
         self._step = 0
-        self._stable_batch_size = self._current_batch_size
-        self._max_successful_batch = 0
+        self._stable_batch_size: Optional[int] = None  # Set after first successful step
 
     @property
     def batch_size(self) -> int:
@@ -460,39 +421,23 @@ class DynamicBatchSizer:
         """Number of OOM errors encountered."""
         return self._oom_count
 
+    @property
+    def is_stabilized(self) -> bool:
+        """Whether batch size has stabilized (no recent OOMs)."""
+        return self._stable_batch_size is not None
+
     def on_step_success(self) -> None:
         """Called after a successful training step."""
         self._step += 1
-        self._consecutive_successes += 1
-        self._max_successful_batch = max(
-            self._max_successful_batch, self._current_batch_size
-        )
-
-        # After warmup, consider growing batch size
-        if (
-            self.config.enabled
-            and self._step > self.config.warmup_steps
-            and self._step % self.config.growth_check_interval == 0
-        ):
-            self._maybe_grow_batch_size()
-
-    def _maybe_grow_batch_size(self) -> None:
-        """Try to increase batch size if memory allows."""
-        if self._current_batch_size >= self.config.max_batch_size:
-            return
-
-        vram_info = get_vram_info(self.device)
-        # Only grow if we have significant headroom (>40% free)
-        if vram_info.free_fraction > 0.4 and self._consecutive_successes >= 20:
-            new_size = int(self._current_batch_size * self.config.growth_factor)
-            new_size = min(new_size, self.config.max_batch_size)
-            # Round to nearest power of 2
-            import math
-
-            new_size = 2 ** int(math.log2(new_size))
-            if new_size > self._current_batch_size:
-                self._current_batch_size = new_size
-                self._consecutive_successes = 0
+        # Mark as stable after first success
+        if self._stable_batch_size is None:
+            self._stable_batch_size = self._current_batch_size
+            vram_info = get_vram_info(self.device)
+            print(
+                f"Batch size stabilized at {self._current_batch_size} "
+                f"(after {self._oom_count} OOM retries, "
+                f"VRAM: {vram_info.used / 1024**3:.1f}GB used / {vram_info.total / 1024**3:.1f}GB total)"
+            )
 
     def on_oom(self) -> int:
         """Called when OOM error occurs. Returns new batch size.
@@ -501,39 +446,42 @@ class DynamicBatchSizer:
             OOMError: If max retries exceeded or batch size too small.
         """
         self._oom_count += 1
-        self._consecutive_successes = 0
-
-        if not self.config.oom_retry_enabled:
-            raise OOMError(
-                f"CUDA OOM error (retry disabled). Batch size was {self._current_batch_size}"
-            )
+        self._stable_batch_size = None  # Reset stability
 
         if self._oom_count > self.config.max_oom_retries:
             raise OOMError(
                 f"Max OOM retries ({self.config.max_oom_retries}) exceeded. "
-                f"Min stable batch size was {self._stable_batch_size}"
+                f"Last batch size was {self._current_batch_size}. "
+                "Try using amp=bf16 or reducing model size."
             )
 
         # Reduce batch size
-        new_size = int(self._current_batch_size * self.config.oom_reduction_factor)
+        old_size = self._current_batch_size
+        new_size = int(old_size * self.config.oom_reduction_factor)
+
+        # Round down to nearest power of 2 for GPU efficiency
+        if new_size > 0:
+            import math
+            new_size = 2 ** int(math.log2(new_size))
+
         new_size = max(new_size, self.config.min_batch_size)
 
         if new_size < self.config.min_batch_size:
             raise OOMError(
                 f"Batch size {new_size} below minimum {self.config.min_batch_size}. "
-                "Try reducing model size or using lower precision (amp=fp16)."
+                "Try using amp=bf16 or reducing model size."
             )
 
-        old_size = self._current_batch_size
         self._current_batch_size = new_size
-        self._stable_batch_size = min(self._stable_batch_size, new_size)
 
         # Clear memory
         clear_memory_cache(self.device)
 
-        warnings.warn(
-            f"OOM detected. Reducing batch size: {old_size} -> {new_size} "
-            f"(retry {self._oom_count}/{self.config.max_oom_retries})"
+        vram_info = get_vram_info(self.device)
+        print(
+            f"OOM! Reducing batch: {old_size} -> {new_size} "
+            f"(retry {self._oom_count}/{self.config.max_oom_retries}, "
+            f"VRAM free: {vram_info.free / 1024**3:.1f}GB)"
         )
 
         return new_size
@@ -543,43 +491,9 @@ class DynamicBatchSizer:
         return {
             "current_batch_size": self._current_batch_size,
             "stable_batch_size": self._stable_batch_size,
-            "max_successful_batch": self._max_successful_batch,
             "oom_count": self._oom_count,
-            "consecutive_successes": self._consecutive_successes,
             "step": self._step,
+            "is_stabilized": self.is_stabilized,
         }
 
 
-def with_oom_retry(
-    fn: Callable[..., T],
-    batch_sizer: DynamicBatchSizer,
-    *args,
-    **kwargs,
-) -> T:
-    """Execute a function with automatic OOM retry.
-
-    On OOM, clears cache, reduces batch size via batch_sizer, and retries.
-
-    Args:
-        fn: Function to execute
-        batch_sizer: DynamicBatchSizer instance for batch management
-        *args, **kwargs: Arguments to pass to fn
-
-    Returns:
-        Result of fn
-
-    Raises:
-        OOMError: If retries exhausted or batch too small
-    """
-    while True:
-        try:
-            result = fn(*args, **kwargs)
-            batch_sizer.on_step_success()
-            return result
-        except Exception as e:
-            if is_oom_error(e):
-                batch_sizer.on_oom()
-                # Retry with smaller batch
-                continue
-            else:
-                raise

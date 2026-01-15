@@ -130,21 +130,13 @@ def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
 
     # Parse dynamic batch configuration
     dyn_batch_cfg = train.get("dynamic_batch", {})
-    batch_size_raw = train.get("batch_size", 256)
+    batch_size_raw = train.get("batch_size", 65536)
     dynamic_batch_config = DynamicBatchConfig(
-        enabled=bool(dyn_batch_cfg.get("enabled", False)),
-        initial_batch_size=(
-            int(batch_size_raw) if batch_size_raw not in ("auto", None) else None
-        ),
+        enabled=bool(dyn_batch_cfg.get("enabled", True)),
+        initial_batch_size=int(batch_size_raw) if batch_size_raw not in ("auto", None) else 65536,
         min_batch_size=int(dyn_batch_cfg.get("min_batch_size", 16)),
-        max_batch_size=int(dyn_batch_cfg.get("max_batch_size", 2048)),
-        memory_fraction=float(dyn_batch_cfg.get("memory_fraction", 0.6)),
-        oom_retry_enabled=bool(dyn_batch_cfg.get("oom_retry_enabled", True)),
         oom_reduction_factor=float(dyn_batch_cfg.get("oom_reduction_factor", 0.7)),
-        max_oom_retries=int(dyn_batch_cfg.get("max_oom_retries", 5)),
-        warmup_steps=int(dyn_batch_cfg.get("warmup_steps", 10)),
-        growth_factor=float(dyn_batch_cfg.get("growth_factor", 1.1)),
-        growth_check_interval=int(dyn_batch_cfg.get("growth_check_interval", 50)),
+        max_oom_retries=int(dyn_batch_cfg.get("max_oom_retries", 10)),
     )
 
     train_config = TrainConfig(
@@ -751,14 +743,6 @@ def train_student(
     batch_sizer = DynamicBatchSizer(
         config=config.dynamic_batch,
         device=device,
-        embedding_dim=student_cfg.in_dim,
-        output_dim=student_cfg.out_dim,
-        num_positives=num_positives,
-        num_negatives=num_negatives,
-        track_b_enabled=track_b_cfg.enable,
-        track_b_k_pos=track_b_cfg.k_pos,
-        track_b_m_neg=track_b_cfg.m_neg,
-        amp_mode=config.amp,
     )
 
     # Log VRAM info and batch size
