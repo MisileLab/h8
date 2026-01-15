@@ -816,11 +816,11 @@ def train_student(
             else:
                 batch_size = config.batch_size
 
-            # OOM retry loop - always enabled when dynamic_batch is on
+            # OOM retry loop
             oom_retry_count = 0
             max_oom_retries = (
                 config.dynamic_batch.max_oom_retries
-                if config.dynamic_batch.enabled
+                if config.dynamic_batch.oom_retry_enabled
                 else 0
             )
 
@@ -997,7 +997,7 @@ def train_student(
                     break
 
                 except Exception as e:
-                    if is_oom_error(e) and config.dynamic_batch.enabled:
+                    if is_oom_error(e) and config.dynamic_batch.oom_retry_enabled:
                         oom_retry_count += 1
                         if oom_retry_count > max_oom_retries:
                             raise RuntimeError(

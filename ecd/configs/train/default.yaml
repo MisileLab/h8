@@ -2,7 +2,7 @@ seed: 42
 device: "auto"
 train:
   steps: 5000
-  batch_size: 65536  # Start large - will auto-reduce on OOM to find max usable
+  batch_size: 8192  # Good balance of VRAM usage and speed
   lr: 1.0e-3
   weight_decay: 0.0
   lr_schedule: "constant"

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import gc
 import os
+import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional, Tuple, TypeVar
 
 import torch
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -497,3 +500,36 @@ class DynamicBatchSizer:
         }
 
 
+def with_oom_retry(
+    fn: Callable[..., T],
+    batch_sizer: DynamicBatchSizer,
+    *args,
+    **kwargs,
+) -> T:
+    """Execute a function with automatic OOM retry.
+
+    On OOM, clears cache, reduces batch size via batch_sizer, and retries.
+
+    Args:
+        fn: Function to execute
+        batch_sizer: DynamicBatchSizer instance for batch management
+        *args, **kwargs: Arguments to pass to fn
+
+    Returns:
+        Result of fn
+
+    Raises:
+        OOMError: If retries exhausted or batch too small
+    """
+    while True:
+        try:
+            result = fn(*args, **kwargs)
+            batch_sizer.on_step_success()
+            return result
+        except Exception as e:
+            if is_oom_error(e):
+                batch_sizer.on_oom()
+                # Retry with smaller batch
+                continue
+            else:
+                raise

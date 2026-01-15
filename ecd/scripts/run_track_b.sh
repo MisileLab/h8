@@ -50,8 +50,8 @@ run_experiment() {
   local seeds="$3"
   local tau="$4"
 
-  local neg_m="1024"
-  local queue_size="32768"
+  local neg_m="${TRACK_B_NEG_M:-4096}"
+  local queue_size="${TRACK_B_QUEUE_SIZE:-12582912}"  # 12M queue (~48GB VRAM) for 60GB GPUs
   local lr="0.0005"
   local lr_schedule="cosine"
   local warmup="2000"
@@ -299,8 +299,8 @@ main() {
         echo "  TRACK_B_ENABLE=true (auto-set)"
         echo "  TRACK_B_DIM=128"
         echo "  TRACK_B_K=50"
-        echo "  TRACK_B_NEG_M=1024"
-        echo "  TRACK_B_QUEUE_SIZE=32768"
+        echo "  TRACK_B_NEG_M=4096"
+        echo "  TRACK_B_QUEUE_SIZE=4194304  # 4M entries (~16GB VRAM)"
         echo "  TRACK_B_TAU=0.07 (varies per experiment)"
         echo "  TRACK_B_FALSE_NEG_MODE=threshold"
         echo "  TRACK_B_FALSE_NEG_THRESHOLD=0.8"
