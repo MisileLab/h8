@@ -169,6 +169,19 @@ DEFAULT_CONFIG="configs/sweep/quick_hyper.yaml"
 : "${BS:=}"
 : "${BATCH_SIZE:=${BS}}"
 
+: "${TRACK_B_ENABLE:=false}"
+: "${TRACK_B_TAU:=0.07}"
+: "${TRACK_B_K:=50}"
+: "${TRACK_B_M:=1024}"
+: "${TRACK_B_QUEUE_SIZE:=32000}"
+: "${TRACK_B_FALSE_NEG_FILTER_MODE:=threshold}"
+: "${TRACK_B_FALSE_NEG_THRESHOLD:=0.8}"
+: "${TRACK_B_FALSE_NEG_TOP_PERCENT:=0.02}"
+: "${TRACK_B_MIX_LAMBDA:=1.0}"
+: "${TRACK_B_QUEUE_CPU_FALLBACK:=true}"
+: "${TRACK_B_USE_SKIP:=true}"
+: "${TRACK_B_ALPHA_INIT:=0.1}"
+
 OUT_DIR="runs/${RUN_ID}"
 LOG_DIR="${OUT_DIR}/logs"
 RESULTS_DIR="${OUT_DIR}/results"
@@ -222,6 +235,18 @@ cp -f "$CONFIG" "${CONFIGS_DIR}/selected_config.yaml"
   echo "  TAIL_TO=$TAIL_TO"
   echo "  NUM_POSITIVES=$NUM_POSITIVES"
   echo "  BATCH_SIZE=${BATCH_SIZE:-<unset>}"
+  echo "  TRACK_B_ENABLE=$TRACK_B_ENABLE"
+  echo "  TRACK_B_TAU=$TRACK_B_TAU"
+  echo "  TRACK_B_K=$TRACK_B_K"
+  echo "  TRACK_B_M=$TRACK_B_M"
+  echo "  TRACK_B_QUEUE_SIZE=$TRACK_B_QUEUE_SIZE"
+  echo "  TRACK_B_FALSE_NEG_FILTER_MODE=$TRACK_B_FALSE_NEG_FILTER_MODE"
+  echo "  TRACK_B_FALSE_NEG_THRESHOLD=$TRACK_B_FALSE_NEG_THRESHOLD"
+  echo "  TRACK_B_FALSE_NEG_TOP_PERCENT=$TRACK_B_FALSE_NEG_TOP_PERCENT"
+  echo "  TRACK_B_MIX_LAMBDA=$TRACK_B_MIX_LAMBDA"
+  echo "  TRACK_B_QUEUE_CPU_FALLBACK=$TRACK_B_QUEUE_CPU_FALLBACK"
+  echo "  TRACK_B_USE_SKIP=$TRACK_B_USE_SKIP"
+  echo "  TRACK_B_ALPHA_INIT=$TRACK_B_ALPHA_INIT"
 } >"$MANIFEST"
 
 build_sweep_overrides() {
@@ -246,6 +271,18 @@ build_sweep_overrides() {
 
   if [[ -n "${BATCH_SIZE}" ]]; then
     ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
+  fi
+
+  if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
+    ovs+=("--override" "sweep.track_b.enable=true")
+    ovs+=("--override" "sweep.track_b.k_pos=[${TRACK_B_K}]")
+    ovs+=("--override" "sweep.track_b.m_neg=[${TRACK_B_M}]")
+    ovs+=("--override" "sweep.track_b.tau=[${TRACK_B_TAU}]")
+    ovs+=("--override" "sweep.track_b.queue_size=[${TRACK_B_QUEUE_SIZE}]")
+    ovs+=("--override" "sweep.track_b.false_neg_filter.mode=${TRACK_B_FALSE_NEG_FILTER_MODE}")
+    ovs+=("--override" "sweep.track_b.false_neg_filter.threshold=[${TRACK_B_FALSE_NEG_THRESHOLD}]")
+    ovs+=("--override" "sweep.track_b.false_neg_filter.top_percent=[${TRACK_B_FALSE_NEG_TOP_PERCENT}]")
+    ovs+=("--override" "sweep.track_b.mix.lambda=[${TRACK_B_MIX_LAMBDA}]")
   fi
 
   printf "%s\0" "${ovs[@]}"
@@ -279,6 +316,18 @@ build_sweepA_overrides_for_grid() {
     ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
   fi
 
+  if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
+    ovs+=("--override" "sweep.track_b.enable=true")
+    ovs+=("--override" "sweep.track_b.k_pos=[${TRACK_B_K}]")
+    ovs+=("--override" "sweep.track_b.m_neg=[${TRACK_B_M}]")
+    ovs+=("--override" "sweep.track_b.tau=[${TRACK_B_TAU}]")
+    ovs+=("--override" "sweep.track_b.queue_size=[${TRACK_B_QUEUE_SIZE}]")
+    ovs+=("--override" "sweep.track_b.false_neg_filter.mode=${TRACK_B_FALSE_NEG_FILTER_MODE}")
+    ovs+=("--override" "sweep.track_b.false_neg_filter.threshold=[${TRACK_B_FALSE_NEG_THRESHOLD}]")
+    ovs+=("--override" "sweep.track_b.false_neg_filter.top_percent=[${TRACK_B_FALSE_NEG_TOP_PERCENT}]")
+    ovs+=("--override" "sweep.track_b.mix.lambda=[${TRACK_B_MIX_LAMBDA}]")
+  fi
+
   printf "%s\0" "${ovs[@]}"
 }
 
@@ -301,6 +350,23 @@ build_single_overrides() {
   ovs+=("--override" "train.rank.multi_positive.enabled=true")
   ovs+=("--override" "train.hard_negative.enabled=true")
   ovs+=("--override" "train.hard_negative.mode=teacher_tail")
+
+  ovs+=("--override" "train.track_b.enable=${TRACK_B_ENABLE}")
+  ovs+=("--override" "train.track_b.k_pos=${TRACK_B_K}")
+  ovs+=("--override" "train.track_b.m_neg=${TRACK_B_M}")
+  ovs+=("--override" "train.track_b.tau=${TRACK_B_TAU}")
+  ovs+=("--override" "train.track_b.queue_size=${TRACK_B_QUEUE_SIZE}")
+  ovs+=("--override" "train.track_b.false_neg_filter.mode=${TRACK_B_FALSE_NEG_FILTER_MODE}")
+  ovs+=("--override" "train.track_b.false_neg_filter.threshold=${TRACK_B_FALSE_NEG_THRESHOLD}")
+  ovs+=("--override" "train.track_b.false_neg_filter.top_percent=${TRACK_B_FALSE_NEG_TOP_PERCENT}")
+  ovs+=("--override" "train.track_b.mix.lambda=${TRACK_B_MIX_LAMBDA}")
+  ovs+=("--override" "train.track_b.queue_cpu_fallback=${TRACK_B_QUEUE_CPU_FALLBACK}")
+
+  if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
+    ovs+=("--override" "model.type=track_b")
+    ovs+=("--override" "model.track_b_use_skip=${TRACK_B_USE_SKIP}")
+    ovs+=("--override" "model.track_b_alpha_init=${TRACK_B_ALPHA_INIT}")
+  fi
 
   if [[ -n "${RESUME}" ]]; then
     ovs+=("--override" "resume=${RESUME}")
@@ -328,7 +394,16 @@ Presets:
 Environment:
   CONFIG=... RUN_ID=... DRY_RUN=1 ...
 
-Examples (6):
+Track-A knobs:
+  MIX_RANDOM, TAIL_TO, NUM_POSITIVES
+
+Track-B v1 knobs:
+  TRACK_B_ENABLE, TRACK_B_TAU, TRACK_B_K, TRACK_B_M, TRACK_B_QUEUE_SIZE
+  TRACK_B_FALSE_NEG_FILTER_MODE, TRACK_B_FALSE_NEG_THRESHOLD
+  TRACK_B_FALSE_NEG_TOP_PERCENT, TRACK_B_MIX_LAMBDA
+  TRACK_B_QUEUE_CPU_FALLBACK, TRACK_B_USE_SKIP, TRACK_B_ALPHA_INIT
+
+Examples (8):
   1) Smoke test:
      $0 smoke
 
@@ -347,9 +422,18 @@ Examples (6):
   6) Quick-hyper knob overrides:
      MIX_RANDOM=0.3 TAIL_TO=100 NUM_POSITIVES=8 $0 sweep
 
+  7) Track-B v1 single run:
+     TRACK_B_ENABLE=true TRACK_B_K=50 TRACK_B_M=1024 TRACK_B_TAU=0.07 $0 single
+
+  8) Track-B v1 sweep with custom knobs:
+     TRACK_B_ENABLE=true TRACK_B_K="[25,50,100]" TRACK_B_TAU="[0.05,0.07,0.10]" $0 sweep
+
 Notes:
 - sweep_quick_hyper only supports --config/--run_id/--seed/--override.
   Track-A knobs are passed via repeated --override keys into sweep.grid.*.
+- Track-B v1 knobs are passed via TRACK_B_* env vars or sweep.track_b.* overrides.
+- Set TRACK_B_ENABLE=true to enable Track-B v1 listwise distillation.
+- When Track-B is enabled, model.type is automatically set to "track_b".
 - Outputs/logs for this wrapper go under: runs/<RUN_ID>/
 EOF
 }

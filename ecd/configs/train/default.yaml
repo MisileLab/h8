@@ -35,6 +35,19 @@ loss:
   beta: 0.5
   gamma: 0.5
   warmup_frac: 0.3
+track_b:
+  enable: false
+  k_pos: 50
+  m_neg: 1024
+  tau: 0.07
+  queue_size: 32000
+  queue_cpu_fallback: true
+  false_neg_filter:
+    mode: "threshold"
+    threshold: 0.8
+    top_percent: 0.02
+  mix:
+    lambda: 1.0
 eval:
   query_n: 2000
   k_values: [10, 100]

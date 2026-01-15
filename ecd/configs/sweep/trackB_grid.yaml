@@ -1,0 +1,14 @@
+steps: [5000, 20000, 50000]
+lr_schedule: [constant, cosine]
+warmup_steps: [0, 500, 1000]
+track_b:
+  k_pos: [25, 50, 100]
+  m_neg: [512, 1024, 2048]
+  tau: [0.05, 0.07, 0.10]
+  queue_size: [32000, 64000]
+  false_neg_filter:
+    mode: [threshold, top_percent, none]
+    threshold: [0.7, 0.8, 0.9]
+    top_percent: [0.01, 0.02, 0.05]
+  mix:
+    lambda: [0.5, 1.0]

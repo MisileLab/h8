@@ -55,6 +55,15 @@ class Combo:
     warmup_steps: int
     amp: str
     batch_size: int
+    track_b_enable: bool = False
+    track_b_k_pos: int = 50
+    track_b_m_neg: int = 1024
+    track_b_tau: float = 0.07
+    track_b_queue_size: int = 32000
+    track_b_false_neg_filter_mode: str = "threshold"
+    track_b_false_neg_threshold: float = 0.8
+    track_b_false_neg_top_percent: float = 0.02
+    track_b_mix_lambda: float = 1.0
 
 
 @dataclass
@@ -74,6 +83,15 @@ class SweepSettings:
     grid_warmup_steps: List[int]
     grid_amp: List[str]
     grid_batch_size: List[int]
+    grid_track_b_enable: List[bool]
+    grid_track_b_k_pos: List[int]
+    grid_track_b_m_neg: List[int]
+    grid_track_b_tau: List[float]
+    grid_track_b_queue_size: List[int]
+    grid_track_b_false_neg_filter_mode: List[str]
+    grid_track_b_false_neg_threshold: List[float]
+    grid_track_b_false_neg_top_percent: List[float]
+    grid_track_b_mix_lambda: List[float]
     tail_from: int
     measure_latency: bool
     latency_queries: int
@@ -256,6 +274,11 @@ def _run_combo(
             f"warm{combo.warmup_steps}",
             f"amp{combo.amp}",
             f"bs{combo.batch_size}",
+            f"TB{int(combo.track_b_enable)}",
+            f"Tk{combo.track_b_k_pos}",
+            f"Tm{combo.track_b_m_neg}",
+            f"Tt{_slug(combo.track_b_tau)}",
+            f"Tq{combo.track_b_queue_size}",
         ]
     )
     run_dir = run_root / "runs" / combo_id
@@ -274,6 +297,15 @@ def _run_combo(
         "tail_from": combo.tail_from,
         "tail_to": combo.tail_to,
         "num_positives": combo.num_positives,
+        "track_b_enable": combo.track_b_enable,
+        "track_b_k_pos": combo.track_b_k_pos,
+        "track_b_m_neg": combo.track_b_m_neg,
+        "track_b_tau": combo.track_b_tau,
+        "track_b_queue_size": combo.track_b_queue_size,
+        "track_b_false_neg_filter_mode": combo.track_b_false_neg_filter_mode,
+        "track_b_false_neg_threshold": combo.track_b_false_neg_threshold,
+        "track_b_false_neg_top_percent": combo.track_b_false_neg_top_percent,
+        "track_b_mix_lambda": combo.track_b_mix_lambda,
         "train_wall_time_sec": None,
         "vs_teacher_recall10": None,
         "vs_teacher_ndcg10": None,
@@ -309,6 +341,25 @@ def _run_combo(
         local_train_cfg["train"]["hard_negative"]["enabled"] = True
         local_train_cfg["train"]["hard_negative"]["mode"] = "teacher_tail"
         local_train_cfg["train"]["rank"]["kind"] = "info_nce"
+        local_train_cfg["track_b"]["enable"] = combo.track_b_enable
+        local_train_cfg["track_b"]["k_pos"] = combo.track_b_k_pos
+        local_train_cfg["track_b"]["m_neg"] = combo.track_b_m_neg
+        local_train_cfg["track_b"]["tau"] = combo.track_b_tau
+        local_train_cfg["track_b"]["queue_size"] = combo.track_b_queue_size
+        local_train_cfg["track_b"]["false_neg_filter"]["mode"] = (
+            combo.track_b_false_neg_filter_mode
+        )
+        local_train_cfg["track_b"]["false_neg_filter"]["threshold"] = (
+            combo.track_b_false_neg_threshold
+        )
+        local_train_cfg["track_b"]["false_neg_filter"]["top_percent"] = (
+            combo.track_b_false_neg_top_percent
+        )
+        local_train_cfg["track_b"]["mix"]["lambda"] = combo.track_b_mix_lambda
+        if combo.track_b_enable:
+            local_train_cfg["model"]["type"] = "track_b"
+            local_train_cfg["model"]["track_b_use_skip"] = True
+            local_train_cfg["model"]["track_b_alpha_init"] = 0.1
         device = resolve_device(local_train_cfg["device"])
         started_at = datetime.now()
         model, _ = train_student(
@@ -436,6 +487,7 @@ def _build_sweep_config(
 ) -> Tuple[SweepSettings, BaseConfig, EvalConfig]:
     sweep = cfg["sweep"]
     grid = sweep["grid"]
+    track_b_grid = grid.get("track_b", {})
     fixed = sweep["fixed"]
     eval_cfg = sweep["eval"]
     output_cfg = sweep["output"]
@@ -457,6 +509,28 @@ def _build_sweep_config(
         grid_amp=[str(x) for x in grid.get("amp", ["none"])],
         grid_batch_size=[int(x) for x in grid.get("batch_size", [])]
         or [int(cfg.get("train", {}).get("batch_size", 256))],
+        grid_track_b_enable=[bool(x) for x in track_b_grid.get("enable", [False])],
+        grid_track_b_k_pos=[int(x) for x in track_b_grid.get("k_pos", [50])],
+        grid_track_b_m_neg=[int(x) for x in track_b_grid.get("m_neg", [1024])],
+        grid_track_b_tau=[float(x) for x in track_b_grid.get("tau", [0.07])],
+        grid_track_b_queue_size=[
+            int(x) for x in track_b_grid.get("queue_size", [32000])
+        ],
+        grid_track_b_false_neg_filter_mode=[
+            str(x)
+            for x in track_b_grid.get("false_neg_filter", {}).get("mode", ["threshold"])
+        ],
+        grid_track_b_false_neg_threshold=[
+            float(x)
+            for x in track_b_grid.get("false_neg_filter", {}).get("threshold", [0.8])
+        ],
+        grid_track_b_false_neg_top_percent=[
+            float(x)
+            for x in track_b_grid.get("false_neg_filter", {}).get("top_percent", [0.02])
+        ],
+        grid_track_b_mix_lambda=[
+            float(x) for x in track_b_grid.get("mix", {}).get("lambda", [1.0])
+        ],
         tail_from=int(fixed["hard_negative"]["tail_from"]),
         measure_latency=bool(eval_cfg["measure_latency"]),
         latency_queries=int(eval_cfg["latency_queries"]),
@@ -524,6 +598,15 @@ def main() -> None:
             sweep_settings.grid_warmup_steps,
             sweep_settings.grid_amp,
             sweep_settings.grid_batch_size,
+            sweep_settings.grid_track_b_enable,
+            sweep_settings.grid_track_b_k_pos,
+            sweep_settings.grid_track_b_m_neg,
+            sweep_settings.grid_track_b_tau,
+            sweep_settings.grid_track_b_queue_size,
+            sweep_settings.grid_track_b_false_neg_filter_mode,
+            sweep_settings.grid_track_b_false_neg_threshold,
+            sweep_settings.grid_track_b_false_neg_top_percent,
+            sweep_settings.grid_track_b_mix_lambda,
         )
     )
     combos = [
@@ -538,8 +621,36 @@ def main() -> None:
             warmup_steps=int(warmup_steps),
             amp=str(amp),
             batch_size=int(batch_size),
+            track_b_enable=bool(track_b_enable),
+            track_b_k_pos=int(track_b_k),
+            track_b_m_neg=int(track_b_m),
+            track_b_tau=float(track_b_tau),
+            track_b_queue_size=int(track_b_queue_size),
+            track_b_false_neg_filter_mode=str(track_b_fn_mode),
+            track_b_false_neg_threshold=float(track_b_fn_thresh),
+            track_b_false_neg_top_percent=float(track_b_fn_top_pct),
+            track_b_mix_lambda=float(track_b_lambda),
         )
-        for mix, tail, num_pos, steps, lr, lr_schedule, warmup_steps, amp, batch_size in grid
+        for (
+            mix,
+            tail,
+            num_pos,
+            steps,
+            lr,
+            lr_schedule,
+            warmup_steps,
+            amp,
+            batch_size,
+            track_b_enable,
+            track_b_k,
+            track_b_m,
+            track_b_tau,
+            track_b_queue_size,
+            track_b_fn_mode,
+            track_b_fn_thresh,
+            track_b_fn_top_pct,
+            track_b_lambda,
+        ) in grid
     ]
     rows: List[Dict[str, Any]] = []
     for combo in combos:
@@ -547,7 +658,8 @@ def main() -> None:
             "start "
             f"mix={combo.mix_random_ratio} tail_to={combo.tail_to} P={combo.num_positives} "
             f"steps={combo.steps} lr={combo.lr} schedule={combo.lr_schedule} warmup={combo.warmup_steps} "
-            f"amp={combo.amp} bs={combo.batch_size}"
+            f"amp={combo.amp} bs={combo.batch_size} "
+            f"TB={combo.track_b_enable} Tk={combo.track_b_k_pos} Tm={combo.track_b_m_neg}"
         )
         row = _run_combo(
             combo,

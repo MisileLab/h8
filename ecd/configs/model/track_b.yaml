@@ -1,0 +1,8 @@
+type: "track_b"
+in_dim: null
+out_dim: 128
+hidden_dim: 512
+dropout: 0.0
+normalize: true
+track_b_use_skip: true
+track_b_alpha_init: 0.1

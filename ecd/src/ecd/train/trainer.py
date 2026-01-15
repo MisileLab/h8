@@ -28,6 +28,15 @@ from ecd.losses.rank import info_nce, info_nce_multi
 from ecd.losses.struct import distortion_loss
 from ecd.metrics.retrieval import compute_metrics
 from ecd.models.student import StudentConfig, build_student
+from ecd.train.memory_queue import TeacherEmbeddingQueue, resolve_queue_storage
+from ecd.train.track_b import (
+    TrackBConfig,
+    build_track_b_config,
+    build_candidate_vectors,
+    candidates_from_topk_and_queue,
+    listwise_kl_distill,
+    reshape_queue_samples,
+)
 from ecd.utils.device import estimate_encode_batch_size, resolve_device
 from ecd.utils.io import ensure_dir, save_json
 from ecd.utils.seed import set_seed
@@ -92,6 +101,7 @@ class TrainConfig:
     multi_positive: MultiPositiveConfig
     loss_mix: LossMixConfig
     hard_negative: HardNegativeConfig
+    track_b: TrackBConfig
 
 
 def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
@@ -107,6 +117,7 @@ def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
     eval_every_raw = train.get("eval_every_steps", train.get("eval_every", 500))
     eval_every = int(eval_every_raw) if eval_every_raw is not None else 0
     log_every = int(train.get("log_every_steps", train.get("log_every", 100)))
+    track_b_cfg = build_track_b_config(train_cfg)
     train_config = TrainConfig(
         seed=int(train_cfg["seed"]),
         device=str(train_cfg["device"]),
@@ -143,6 +154,7 @@ def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
             tail_to=int(hard_cfg["tail_to"]),
             mix_random_ratio=float(hard_cfg["mix_random_ratio"]),
         ),
+        track_b=track_b_cfg,
     )
     eval_config = EvalConfig(
         query_n=int(eval_cfg["query_n"]),
@@ -732,6 +744,22 @@ def train_student(
     warned_empty_hard = False
     positive_k = min(10, teacher_topk_tensor.shape[1])
     num_negatives = 5
+
+    track_b_cfg = config.track_b
+    queue: Optional[TeacherEmbeddingQueue] = None
+    if track_b_cfg.enable:
+        use_cpu_storage = resolve_queue_storage(
+            prefer_device_storage=not track_b_cfg.queue_cpu_fallback,
+            queue_size=track_b_cfg.queue_size,
+            embedding_dim=int(teacher_tensor.shape[1]),
+            device=device,
+        )
+        queue = TeacherEmbeddingQueue(
+            embedding_dim=int(teacher_tensor.shape[1]),
+            size=track_b_cfg.queue_size,
+            device=device,
+            use_cpu_storage=use_cpu_storage,
+        )
     num_positives = (
         config.multi_positive.num_positives if config.multi_positive.enabled else 1
     )
@@ -747,6 +775,8 @@ def train_student(
             teacher_positive = teacher_tensor[positive_indices]
             teacher_neighbor = teacher_tensor[neighbor_indices]
             teacher_neg = None
+            if queue is not None:
+                queue.enqueue(teacher_anchor)
             if config.use_rank:
                 hard_cfg = config.hard_negative
                 hard_neg = None
@@ -833,9 +863,64 @@ def train_student(
                     )
                 else:
                     struct = torch.tensor(0.0, device=device)
-                loss = mix_losses(
+                loss_track_a = mix_losses(
                     distill, rank, struct, config.loss_mix, step, config.steps
                 )
+
+                loss_listwise = torch.tensor(0.0, device=device)
+                p_t_entropy = torch.tensor(0.0, device=device)
+                filtered_neg_ratio = 0.0
+                if track_b_cfg.enable:
+                    if queue is None:
+                        raise RuntimeError("track_b enabled but queue is None")
+                    if queue.num_filled <= 0:
+                        warm_n = min(track_b_cfg.queue_size, num_items)
+                        perm = torch.randperm(num_items, device=device)[:warm_n]
+                        queue.enqueue(teacher_tensor[perm])
+
+                    sampled = queue.sample(
+                        track_b_cfg.m_neg * batch_size, device=device
+                    )
+                    queue_negs = reshape_queue_samples(
+                        sampled, batch_size, track_b_cfg.m_neg
+                    )
+
+                    teacher_pos_vecs = teacher_tensor[
+                        teacher_topk_tensor[anchor_indices, : track_b_cfg.k_pos]
+                    ]
+
+                    candidates, filtered_neg_ratio = build_candidate_vectors(
+                        teacher_anchor,
+                        teacher_pos_vecs,
+                        queue_negs,
+                        false_neg_filter_mode=track_b_cfg.false_neg_filter_mode,
+                        false_neg_threshold=track_b_cfg.false_neg_threshold,
+                        false_neg_top_percent=track_b_cfg.false_neg_top_percent,
+                    )
+
+                    teacher_scores = torch.einsum(
+                        "bd,bnd->bn",
+                        F.normalize(teacher_anchor, dim=-1),
+                        F.normalize(candidates, dim=-1),
+                    )
+
+                    student_anchor_b = student_anchor
+                    student_cand_b = model(
+                        candidates.view(-1, candidates.shape[-1])
+                    ).view(candidates.shape[0], candidates.shape[1], -1)
+                    student_scores = torch.einsum(
+                        "bd,bnd->bn",
+                        F.normalize(student_anchor_b, dim=-1),
+                        F.normalize(student_cand_b, dim=-1),
+                    )
+
+                    loss_listwise, p_t_entropy = listwise_kl_distill(
+                        teacher_scores, student_scores, tau=track_b_cfg.tau
+                    )
+
+                loss = (
+                    1.0 - track_b_cfg.mix_lambda
+                ) * loss_track_a + track_b_cfg.mix_lambda * loss_listwise
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -909,6 +994,8 @@ def train_student(
                         "loss_distill": float(distill.detach().cpu().item()),
                         "loss_rank": float(rank.detach().cpu().item()),
                         "loss_struct": float(struct.detach().cpu().item()),
+                        "loss_track_a": float(loss_track_a.detach().cpu().item()),
+                        "loss_listwise": float(loss_listwise.detach().cpu().item()),
                         "teacher_norm_mean": teacher_norm["mean"],
                         "teacher_norm_std": teacher_norm["std"],
                         "teacher_norm_p50": teacher_norm["p50"],
@@ -929,6 +1016,23 @@ def train_student(
                         "num_positives": num_positives,
                         "mix_random_ratio": config.hard_negative.mix_random_ratio,
                         "tail_to": config.hard_negative.tail_to,
+                        "track_b_enable": bool(track_b_cfg.enable),
+                        "track_b_tau": float(track_b_cfg.tau),
+                        "track_b_k": int(track_b_cfg.k_pos),
+                        "track_b_m": int(track_b_cfg.m_neg),
+                        "track_b_queue_size": int(track_b_cfg.queue_size),
+                        "track_b_false_neg_filter_mode": str(
+                            track_b_cfg.false_neg_filter_mode
+                        ),
+                        "track_b_false_neg_threshold": float(
+                            track_b_cfg.false_neg_threshold
+                        ),
+                        "track_b_false_neg_top_percent": float(
+                            track_b_cfg.false_neg_top_percent
+                        ),
+                        "track_b_mix_lambda": float(track_b_cfg.mix_lambda),
+                        "track_b_p_t_entropy": float(p_t_entropy.detach().cpu().item()),
+                        "track_b_filtered_neg_ratio": float(filtered_neg_ratio),
                         "eval_status": eval_metrics.get("eval_status"),
                         "vs_teacher_recall@10": eval_metrics.get(
                             "vs_teacher_recall@10"
