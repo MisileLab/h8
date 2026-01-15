@@ -37,7 +37,15 @@ from ecd.train.track_b import (
     listwise_kl_distill,
     reshape_queue_samples,
 )
-from ecd.utils.device import estimate_encode_batch_size, resolve_device
+from ecd.utils.device import (
+    DynamicBatchConfig,
+    DynamicBatchSizer,
+    clear_memory_cache,
+    estimate_encode_batch_size,
+    get_vram_info,
+    is_oom_error,
+    resolve_device,
+)
 from ecd.utils.io import ensure_dir, save_json
 from ecd.utils.seed import set_seed
 
@@ -102,6 +110,7 @@ class TrainConfig:
     loss_mix: LossMixConfig
     hard_negative: HardNegativeConfig
     track_b: TrackBConfig
+    dynamic_batch: DynamicBatchConfig
 
 
 def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
@@ -118,11 +127,31 @@ def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
     eval_every = int(eval_every_raw) if eval_every_raw is not None else 0
     log_every = int(train.get("log_every_steps", train.get("log_every", 100)))
     track_b_cfg = build_track_b_config(train_cfg)
+
+    # Parse dynamic batch configuration
+    dyn_batch_cfg = train.get("dynamic_batch", {})
+    batch_size_raw = train.get("batch_size", 256)
+    dynamic_batch_config = DynamicBatchConfig(
+        enabled=bool(dyn_batch_cfg.get("enabled", False)),
+        initial_batch_size=(
+            int(batch_size_raw) if batch_size_raw not in ("auto", None) else None
+        ),
+        min_batch_size=int(dyn_batch_cfg.get("min_batch_size", 16)),
+        max_batch_size=int(dyn_batch_cfg.get("max_batch_size", 2048)),
+        memory_fraction=float(dyn_batch_cfg.get("memory_fraction", 0.6)),
+        oom_retry_enabled=bool(dyn_batch_cfg.get("oom_retry_enabled", True)),
+        oom_reduction_factor=float(dyn_batch_cfg.get("oom_reduction_factor", 0.7)),
+        max_oom_retries=int(dyn_batch_cfg.get("max_oom_retries", 5)),
+        warmup_steps=int(dyn_batch_cfg.get("warmup_steps", 10)),
+        growth_factor=float(dyn_batch_cfg.get("growth_factor", 1.1)),
+        growth_check_interval=int(dyn_batch_cfg.get("growth_check_interval", 50)),
+    )
+
     train_config = TrainConfig(
         seed=int(train_cfg["seed"]),
         device=str(train_cfg["device"]),
         steps=steps,
-        batch_size=int(train["batch_size"]),
+        batch_size=int(train["batch_size"]) if train.get("batch_size") not in ("auto", None) else 256,
         lr=float(train["lr"]),
         weight_decay=float(train["weight_decay"]),
         lr_schedule=str(train.get("lr_schedule", "constant")),
@@ -155,6 +184,7 @@ def build_train_config(train_cfg: Dict) -> Tuple[TrainConfig, EvalConfig]:
             mix_random_ratio=float(hard_cfg["mix_random_ratio"]),
         ),
         track_b=track_b_cfg,
+        dynamic_batch=dynamic_batch_config,
     )
     eval_config = EvalConfig(
         query_n=int(eval_cfg["query_n"]),
@@ -710,10 +740,42 @@ def train_student(
         optimizer, config.steps, config.warmup_steps, config.lr_schedule
     )
     autocast_context, scaler = _build_amp_context(config.amp, device)
+
+    # Initialize dynamic batch sizer
+    track_b_cfg = config.track_b
+    num_positives = (
+        config.multi_positive.num_positives if config.multi_positive.enabled else 1
+    )
+    num_negatives = 5  # Fixed in training loop
+
+    batch_sizer = DynamicBatchSizer(
+        config=config.dynamic_batch,
+        device=device,
+        embedding_dim=student_cfg.in_dim,
+        output_dim=student_cfg.out_dim,
+        num_positives=num_positives,
+        num_negatives=num_negatives,
+        track_b_enabled=track_b_cfg.enable,
+        track_b_k_pos=track_b_cfg.k_pos,
+        track_b_m_neg=track_b_cfg.m_neg,
+        amp_mode=config.amp,
+    )
+
+    # Log VRAM info and batch size
+    vram_info = get_vram_info(device)
     print(f"amp_mode={config.amp} device={device.type}")
     print(
+        f"vram_info: total={vram_info.total / 1024**3:.1f}GB "
+        f"free={vram_info.free / 1024**3:.1f}GB "
+        f"used={vram_info.used / 1024**3:.1f}GB"
+    )
+    effective_batch_size = (
+        batch_sizer.batch_size if config.dynamic_batch.enabled else config.batch_size
+    )
+    print(
         "train_effective_config "
-        + f"effective_batch_size={config.batch_size} "
+        + f"effective_batch_size={effective_batch_size} "
+        + f"dynamic_batch_enabled={config.dynamic_batch.enabled} "
         + f"steps={config.steps} lr={config.lr} weight_decay={config.weight_decay} "
         + f"lr_schedule={config.lr_schedule} warmup_steps={config.warmup_steps}"
     )
@@ -760,178 +822,237 @@ def train_student(
             device=device,
             use_cpu_storage=use_cpu_storage,
         )
-    num_positives = (
-        config.multi_positive.num_positives if config.multi_positive.enabled else 1
-    )
+    # num_positives already defined above for batch_sizer
+    last_logged_batch_size = effective_batch_size
     try:
         while step < config.steps:
-            batch_size = config.batch_size
-            anchor_indices = torch.randint(0, num_items, (batch_size,), device=device)
-            positive_indices = _sample_positive_indices(
-                teacher_topk_tensor, anchor_indices, positive_k, num_positives
-            )
-            neighbor_indices = teacher_topk_tensor[anchor_indices, :positive_k]
-            teacher_anchor = teacher_tensor[anchor_indices]
-            teacher_positive = teacher_tensor[positive_indices]
-            teacher_neighbor = teacher_tensor[neighbor_indices]
-            teacher_neg = None
-            if queue is not None:
-                queue.enqueue(teacher_anchor)
-            if config.use_rank:
-                hard_cfg = config.hard_negative
-                hard_neg = None
-                if hard_cfg.enabled:
-                    if hard_cfg.mode != "teacher_tail":
-                        raise ValueError("Unsupported hard negative mode")
-                    hard_neg = _sample_hard_negatives(
-                        teacher_topk_tensor,
-                        anchor_indices,
-                        hard_cfg.tail_from,
-                        hard_cfg.tail_to,
-                        num_negatives,
-                    )
-                    if hard_neg is None and not warned_empty_hard:
-                        print("hard negative pool empty; falling back to random")
-                        warned_empty_hard = True
-                random_neg = _sample_random_negatives(
-                    num_items,
-                    anchor_indices,
-                    positive_indices,
-                    num_negatives,
-                )
-                neg_indices = _mix_negatives(
-                    hard_neg, random_neg, hard_cfg.mix_random_ratio
-                )
-                neg_indices = _ensure_valid_negatives(
-                    neg_indices,
-                    num_items,
-                    anchor_indices,
-                    positive_indices,
-                )
-                teacher_neg = teacher_tensor[neg_indices]
-            optimizer.zero_grad()
-            with autocast_context:
-                student_anchor = model(teacher_anchor)
-                student_positive = model(
-                    teacher_positive.view(-1, teacher_positive.shape[-1])
-                ).view(teacher_positive.shape[0], teacher_positive.shape[1], -1)
-                student_neighbor = model(
-                    teacher_neighbor.view(-1, teacher_neighbor.shape[-1])
-                ).view(teacher_neighbor.shape[0], teacher_neighbor.shape[1], -1)
-                student_neg = None
-                if config.use_rank:
-                    if teacher_neg is None:
-                        raise RuntimeError(
-                            "rank loss enabled but teacher_neg was not sampled"
-                        )
-                    student_neg = model(
-                        teacher_neg.view(-1, teacher_neg.shape[-1])
-                    ).view(teacher_neg.shape[0], teacher_neg.shape[1], -1)
-                if config.use_distill:
-                    distill = distill_loss(
-                        teacher_anchor, student_anchor, config.distill_mode
-                    )
-                else:
-                    distill = torch.tensor(0.0, device=device)
-                rank = torch.tensor(0.0, device=device)
-                if config.use_rank:
-                    if student_neg is None:
-                        raise RuntimeError("rank loss enabled but student_neg is None")
-                    if config.rank_kind != "info_nce":
-                        raise ValueError("Unsupported rank kind")
-                    student_neg_tensor = cast(torch.Tensor, student_neg)
-                    if config.multi_positive.enabled:
-                        rank = info_nce_multi(
-                            student_anchor,
-                            student_positive,
-                            student_neg_tensor,
-                            temperature=config.rank_temperature,
-                        )
-                    else:
-                        rank = info_nce(
-                            student_anchor,
-                            student_positive[:, 0],
-                            student_neg_tensor,
-                            temperature=config.rank_temperature,
-                        )
-                if config.use_struct:
-                    struct = distortion_loss(
-                        teacher_anchor,
-                        student_anchor,
-                        teacher_neighbor,
-                        student_neighbor,
-                    )
-                else:
-                    struct = torch.tensor(0.0, device=device)
-                loss_track_a = mix_losses(
-                    distill, rank, struct, config.loss_mix, step, config.steps
-                )
-
-                loss_listwise = torch.tensor(0.0, device=device)
-                p_t_entropy = torch.tensor(0.0, device=device)
-                filtered_neg_ratio = 0.0
-                if track_b_cfg.enable:
-                    if queue is None:
-                        raise RuntimeError("track_b enabled but queue is None")
-                    if queue.num_filled <= 0:
-                        warm_n = min(track_b_cfg.queue_size, num_items)
-                        perm = torch.randperm(num_items, device=device)[:warm_n]
-                        queue.enqueue(teacher_tensor[perm])
-
-                    sampled = queue.sample(
-                        track_b_cfg.m_neg * batch_size, device=device
-                    )
-                    queue_negs = reshape_queue_samples(
-                        sampled, batch_size, track_b_cfg.m_neg
-                    )
-
-                    teacher_pos_vecs = teacher_tensor[
-                        teacher_topk_tensor[anchor_indices, : track_b_cfg.k_pos]
-                    ]
-
-                    candidates, filtered_neg_ratio = build_candidate_vectors(
-                        teacher_anchor,
-                        teacher_pos_vecs,
-                        queue_negs,
-                        false_neg_filter_mode=track_b_cfg.false_neg_filter_mode,
-                        false_neg_threshold=track_b_cfg.false_neg_threshold,
-                        false_neg_top_percent=track_b_cfg.false_neg_top_percent,
-                    )
-
-                    teacher_scores = torch.einsum(
-                        "bd,bnd->bn",
-                        F.normalize(teacher_anchor, dim=-1),
-                        F.normalize(candidates, dim=-1),
-                    )
-
-                    student_anchor_b = student_anchor
-                    student_cand_b = model(
-                        candidates.view(-1, candidates.shape[-1])
-                    ).view(candidates.shape[0], candidates.shape[1], -1)
-                    student_scores = torch.einsum(
-                        "bd,bnd->bn",
-                        F.normalize(student_anchor_b, dim=-1),
-                        F.normalize(student_cand_b, dim=-1),
-                    )
-
-                    loss_listwise, p_t_entropy = listwise_kl_distill(
-                        teacher_scores, student_scores, tau=track_b_cfg.tau
-                    )
-
-                loss = (
-                    1.0 - track_b_cfg.mix_lambda
-                ) * loss_track_a + track_b_cfg.mix_lambda * loss_listwise
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+            # Get current batch size (dynamic or fixed)
+            if config.dynamic_batch.enabled:
+                batch_size = batch_sizer.batch_size
             else:
-                loss.backward()
-                optimizer.step()
+                batch_size = config.batch_size
+
+            # OOM retry loop
+            oom_retry_count = 0
+            max_oom_retries = (
+                config.dynamic_batch.max_oom_retries
+                if config.dynamic_batch.oom_retry_enabled
+                else 0
+            )
+
+            while True:
+                try:
+                    anchor_indices = torch.randint(0, num_items, (batch_size,), device=device)
+                    positive_indices = _sample_positive_indices(
+                        teacher_topk_tensor, anchor_indices, positive_k, num_positives
+                    )
+                    neighbor_indices = teacher_topk_tensor[anchor_indices, :positive_k]
+                    teacher_anchor = teacher_tensor[anchor_indices]
+                    teacher_positive = teacher_tensor[positive_indices]
+                    teacher_neighbor = teacher_tensor[neighbor_indices]
+                    teacher_neg = None
+                    if queue is not None:
+                        queue.enqueue(teacher_anchor)
+                    if config.use_rank:
+                        hard_cfg = config.hard_negative
+                        hard_neg = None
+                        if hard_cfg.enabled:
+                            if hard_cfg.mode != "teacher_tail":
+                                raise ValueError("Unsupported hard negative mode")
+                            hard_neg = _sample_hard_negatives(
+                                teacher_topk_tensor,
+                                anchor_indices,
+                                hard_cfg.tail_from,
+                                hard_cfg.tail_to,
+                                num_negatives,
+                            )
+                            if hard_neg is None and not warned_empty_hard:
+                                print("hard negative pool empty; falling back to random")
+                                warned_empty_hard = True
+                        random_neg = _sample_random_negatives(
+                            num_items,
+                            anchor_indices,
+                            positive_indices,
+                            num_negatives,
+                        )
+                        neg_indices = _mix_negatives(
+                            hard_neg, random_neg, hard_cfg.mix_random_ratio
+                        )
+                        neg_indices = _ensure_valid_negatives(
+                            neg_indices,
+                            num_items,
+                            anchor_indices,
+                            positive_indices,
+                        )
+                        teacher_neg = teacher_tensor[neg_indices]
+                    optimizer.zero_grad()
+                    with autocast_context:
+                        student_anchor = model(teacher_anchor)
+                        student_positive = model(
+                            teacher_positive.view(-1, teacher_positive.shape[-1])
+                        ).view(teacher_positive.shape[0], teacher_positive.shape[1], -1)
+                        student_neighbor = model(
+                            teacher_neighbor.view(-1, teacher_neighbor.shape[-1])
+                        ).view(teacher_neighbor.shape[0], teacher_neighbor.shape[1], -1)
+                        student_neg = None
+                        if config.use_rank:
+                            if teacher_neg is None:
+                                raise RuntimeError(
+                                    "rank loss enabled but teacher_neg was not sampled"
+                                )
+                            student_neg = model(
+                                teacher_neg.view(-1, teacher_neg.shape[-1])
+                            ).view(teacher_neg.shape[0], teacher_neg.shape[1], -1)
+                        if config.use_distill:
+                            distill = distill_loss(
+                                teacher_anchor, student_anchor, config.distill_mode
+                            )
+                        else:
+                            distill = torch.tensor(0.0, device=device)
+                        rank = torch.tensor(0.0, device=device)
+                        if config.use_rank:
+                            if student_neg is None:
+                                raise RuntimeError("rank loss enabled but student_neg is None")
+                            if config.rank_kind != "info_nce":
+                                raise ValueError("Unsupported rank kind")
+                            student_neg_tensor = cast(torch.Tensor, student_neg)
+                            if config.multi_positive.enabled:
+                                rank = info_nce_multi(
+                                    student_anchor,
+                                    student_positive,
+                                    student_neg_tensor,
+                                    temperature=config.rank_temperature,
+                                )
+                            else:
+                                rank = info_nce(
+                                    student_anchor,
+                                    student_positive[:, 0],
+                                    student_neg_tensor,
+                                    temperature=config.rank_temperature,
+                                )
+                        if config.use_struct:
+                            struct = distortion_loss(
+                                teacher_anchor,
+                                student_anchor,
+                                teacher_neighbor,
+                                student_neighbor,
+                            )
+                        else:
+                            struct = torch.tensor(0.0, device=device)
+                        loss_track_a = mix_losses(
+                            distill, rank, struct, config.loss_mix, step, config.steps
+                        )
+
+                        loss_listwise = torch.tensor(0.0, device=device)
+                        p_t_entropy = torch.tensor(0.0, device=device)
+                        filtered_neg_ratio = 0.0
+                        if track_b_cfg.enable:
+                            if queue is None:
+                                raise RuntimeError("track_b enabled but queue is None")
+                            if queue.num_filled <= 0:
+                                warm_n = min(track_b_cfg.queue_size, num_items)
+                                perm = torch.randperm(num_items, device=device)[:warm_n]
+                                queue.enqueue(teacher_tensor[perm])
+
+                            sampled = queue.sample(
+                                track_b_cfg.m_neg * batch_size, device=device
+                            )
+                            queue_negs = reshape_queue_samples(
+                                sampled, batch_size, track_b_cfg.m_neg
+                            )
+
+                            teacher_pos_vecs = teacher_tensor[
+                                teacher_topk_tensor[anchor_indices, : track_b_cfg.k_pos]
+                            ]
+
+                            candidates, filtered_neg_ratio = build_candidate_vectors(
+                                teacher_anchor,
+                                teacher_pos_vecs,
+                                queue_negs,
+                                false_neg_filter_mode=track_b_cfg.false_neg_filter_mode,
+                                false_neg_threshold=track_b_cfg.false_neg_threshold,
+                                false_neg_top_percent=track_b_cfg.false_neg_top_percent,
+                            )
+
+                            teacher_scores = torch.einsum(
+                                "bd,bnd->bn",
+                                F.normalize(teacher_anchor, dim=-1),
+                                F.normalize(candidates, dim=-1),
+                            )
+
+                            student_anchor_b = student_anchor
+                            student_cand_b = model(
+                                candidates.view(-1, candidates.shape[-1])
+                            ).view(candidates.shape[0], candidates.shape[1], -1)
+                            student_scores = torch.einsum(
+                                "bd,bnd->bn",
+                                F.normalize(student_anchor_b, dim=-1),
+                                F.normalize(student_cand_b, dim=-1),
+                            )
+
+                            loss_listwise, p_t_entropy = listwise_kl_distill(
+                                teacher_scores, student_scores, tau=track_b_cfg.tau
+                            )
+
+                        loss = (
+                            1.0 - track_b_cfg.mix_lambda
+                        ) * loss_track_a + track_b_cfg.mix_lambda * loss_listwise
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
+
+                    # Step completed successfully
+                    if config.dynamic_batch.enabled:
+                        batch_sizer.on_step_success()
+
+                    # Break out of OOM retry loop on success
+                    break
+
+                except Exception as e:
+                    if is_oom_error(e) and config.dynamic_batch.oom_retry_enabled:
+                        oom_retry_count += 1
+                        if oom_retry_count > max_oom_retries:
+                            raise RuntimeError(
+                                f"Max OOM retries ({max_oom_retries}) exceeded. "
+                                f"Last batch size: {batch_size}. "
+                                "Try reducing batch_size, using amp=fp16, or a smaller model."
+                            ) from e
+
+                        # Clear memory and reduce batch size
+                        clear_memory_cache(device)
+                        if config.dynamic_batch.enabled:
+                            batch_size = batch_sizer.on_oom()
+                        else:
+                            # For fixed batch mode, apply manual reduction
+                            batch_size = max(
+                                config.dynamic_batch.min_batch_size,
+                                int(batch_size * config.dynamic_batch.oom_reduction_factor),
+                            )
+
+                        print(
+                            f"OOM at step {step}, retry {oom_retry_count}/{max_oom_retries}, "
+                            f"reducing batch_size to {batch_size}"
+                        )
+                        # Re-sample with smaller batch
+                        continue
+                    else:
+                        # Non-OOM error, re-raise
+                        raise
+
             scheduler.step()
             stats["loss"] = float(loss.detach().cpu().item())
             step += 1
             progress.update(1)
+
+            # Log batch size changes
+            current_bs = batch_sizer.batch_size if config.dynamic_batch.enabled else batch_size
+            if current_bs != last_logged_batch_size:
+                print(f"Batch size changed: {last_logged_batch_size} -> {current_bs} at step {step}")
+                last_logged_batch_size = current_bs
             if (
                 config.save_every > 0 and step % config.save_every == 0
             ) or step == config.steps:
@@ -987,9 +1108,14 @@ def train_student(
                             best_checkpoint = save_named_checkpoint(
                                 model, output_dir, "student_best.pt", student_cfg
                             )
+                # Get batch size stats for logging
+                batch_stats = batch_sizer.get_stats() if config.dynamic_batch.enabled else {}
                 log_rows.append(
                     {
                         "step": step,
+                        "batch_size": batch_size,
+                        "dynamic_batch_enabled": config.dynamic_batch.enabled,
+                        "batch_oom_count": batch_stats.get("oom_count", 0),
                         "loss_total": float(loss.detach().cpu().item()),
                         "loss_distill": float(distill.detach().cpu().item()),
                         "loss_rank": float(rank.detach().cpu().item()),

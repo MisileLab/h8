@@ -1,0 +1,61 @@
+# Dockerfile for SaladCloud GPU deployment
+# 
+# Build:
+#   docker build -f Dockerfile.saladcloud -t ecd-saladcloud:latest .
+#
+# Push to registry:
+#   docker tag ecd-saladcloud:latest YOUR_REGISTRY/ecd-saladcloud:latest
+#   docker push YOUR_REGISTRY/ecd-saladcloud:latest
+#
+# Then use in SaladCloud container group configuration
+
+# Base image with CUDA and PyTorch
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    wget \
+    vim \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast dependency management
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Set working directory
+WORKDIR /app/ecd
+
+# Copy dependency files first for better caching
+COPY pyproject.toml uv.lock* ./
+
+# Install Python dependencies
+RUN uv venv && uv sync --frozen || pip install -e .
+
+# Copy the rest of the project
+COPY . .
+
+# Make scripts executable
+RUN chmod +x scripts/*.sh
+
+# Environment variables (can be overridden in SaladCloud config)
+ENV WORK_DIR=/app/ecd
+ENV TRACK_B_STEPS=20000
+ENV TRACK_B_SEEDS="0,1,2"
+ENV QUICK_MODE=false
+ENV UPLOAD_RESULTS=false
+
+# Health check for SaladCloud
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${SALAD_HEALTH_CHECK_PORT:-8080}/ || exit 1
+
+# Default entrypoint - run the deployment script
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["source /app/ecd/.venv/bin/activate 2>/dev/null || true && bash /app/ecd/scripts/saladcloud_deploy.sh"]

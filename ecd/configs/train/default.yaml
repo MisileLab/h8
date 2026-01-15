@@ -2,18 +2,32 @@ seed: 42
 device: "auto"
 train:
   steps: 5000
-  batch_size: 256
+  batch_size: 256  # Initial batch size; use "auto" to auto-estimate from VRAM
   lr: 1.0e-3
   weight_decay: 0.0
   lr_schedule: "constant"
   warmup_steps: 0
-  amp: "none"
+  amp: "none"  # Use "fp16" or "bf16" to enable mixed precision (reduces memory)
   resume_path: null
   log_every: 100
   eval_every: 500
   save_every: 500
   save_every_steps: null
   eval_every_steps: null
+
+  # Dynamic batch size configuration
+  dynamic_batch:
+    enabled: true  # Automatic batch size adjustment based on VRAM
+    min_batch_size: 16  # Minimum batch size (won't go below this)
+    max_batch_size: 4096  # Maximum batch size (won't exceed this)
+    memory_fraction: 0.95  # Target fraction of VRAM to use (aggressive)
+    oom_retry_enabled: true  # Retry on OOM with smaller batch
+    oom_reduction_factor: 0.7  # Reduce batch by this factor on OOM
+    max_oom_retries: 5  # Max number of OOM retries before failing
+    warmup_steps: 10  # Steps before attempting batch size growth
+    growth_factor: 1.1  # Factor to grow batch size if memory allows
+    growth_check_interval: 50  # Check for growth every N steps
+
   hard_negative:
     enabled: true
     mode: "teacher_tail"
