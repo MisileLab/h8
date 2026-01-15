@@ -60,7 +60,7 @@ run_experiment() {
   local k="50"
   local false_neg_mode="threshold"
   local false_neg_threshold="0.8"
-  local batch_size="${BATCH_SIZE:-65536}"  # Start large, auto-reduces on OOM
+  local batch_size="${BATCH_SIZE:-8192}"  # Good balance of speed and VRAM
 
   local run_id
   run_id="$(generate_run_id "$exp_name" "$steps" "$seeds" "$tau" "$neg_m" "$queue_size")"
@@ -300,7 +300,7 @@ main() {
         echo "  TRACK_B_DIM=128"
         echo "  TRACK_B_K=50"
         echo "  TRACK_B_NEG_M=4096"
-        echo "  TRACK_B_QUEUE_SIZE=4194304  # 4M entries (~16GB VRAM)"
+        echo "  TRACK_B_QUEUE_SIZE=12582912  # 12M entries (~48GB VRAM)"
         echo "  TRACK_B_TAU=0.07 (varies per experiment)"
         echo "  TRACK_B_FALSE_NEG_MODE=threshold"
         echo "  TRACK_B_FALSE_NEG_THRESHOLD=0.8"
@@ -311,10 +311,10 @@ main() {
         echo "  AMP=none"
         echo ""
         echo "Batch size environment variable:"
-        echo "  BATCH_SIZE=65536       Start large, auto-reduces on OOM to find max"
+        echo "  BATCH_SIZE=8192        Default (fast iterations, ~10 it/s)"
         echo ""
         echo "Example:"
-        echo "  AMP=bf16 bash scripts/run_track_b.sh  # Uses default 65536, auto-finds optimal"
+        echo "  AMP=bf16 bash scripts/run_track_b.sh  # Uses batch=8192, queue=12M"
         exit 0
         ;;
     esac
