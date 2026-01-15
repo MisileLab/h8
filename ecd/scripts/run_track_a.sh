@@ -168,6 +168,7 @@ DEFAULT_CONFIG="configs/sweep/quick_hyper.yaml"
 : "${NUM_POSITIVES:=8}"
 : "${BS:=}"
 : "${BATCH_SIZE:=${BS}}"
+: "${MAX_BATCH_SIZE:=}"
 
 : "${TRACK_B_ENABLE:=false}"
 : "${TRACK_B_TAU:=0.07}"
@@ -235,6 +236,7 @@ cp -f "$CONFIG" "${CONFIGS_DIR}/selected_config.yaml"
   echo "  TAIL_TO=$TAIL_TO"
   echo "  NUM_POSITIVES=$NUM_POSITIVES"
   echo "  BATCH_SIZE=${BATCH_SIZE:-<unset>}"
+  echo "  MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-<unset>}"
   echo "  TRACK_B_ENABLE=$TRACK_B_ENABLE"
   echo "  TRACK_B_TAU=$TRACK_B_TAU"
   echo "  TRACK_B_K=$TRACK_B_K"
@@ -271,6 +273,9 @@ build_sweep_overrides() {
 
   if [[ -n "${BATCH_SIZE}" ]]; then
     ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
+  fi
+  if [[ -n "${MAX_BATCH_SIZE}" ]]; then
+    ovs+=("--override" "train.dynamic_batch.max_batch_size=${MAX_BATCH_SIZE}")
   fi
 
   if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
@@ -315,6 +320,9 @@ build_sweepA_overrides_for_grid() {
   if [[ -n "${BATCH_SIZE}" ]]; then
     ovs+=("--override" "sweep.grid.batch_size=[${BATCH_SIZE}]")
   fi
+  if [[ -n "${MAX_BATCH_SIZE}" ]]; then
+    ovs+=("--override" "train.dynamic_batch.max_batch_size=${MAX_BATCH_SIZE}")
+  fi
 
   if [[ "${TRACK_B_ENABLE}" == "true" ]]; then
     ovs+=("--override" "sweep.track_b.enable=true")
@@ -343,6 +351,13 @@ build_single_overrides() {
   ovs+=("--override" "train.amp=${AMP}")
   ovs+=("--override" "train.save_every_steps=${SAVE_EVERY}")
   ovs+=("--override" "train.eval_every_steps=${EVAL_EVERY}")
+
+  if [[ -n "${BATCH_SIZE}" ]]; then
+    ovs+=("--override" "train.batch_size=${BATCH_SIZE}")
+  fi
+  if [[ -n "${MAX_BATCH_SIZE}" ]]; then
+    ovs+=("--override" "train.dynamic_batch.max_batch_size=${MAX_BATCH_SIZE}")
+  fi
 
   ovs+=("--override" "train.hard_negative.mix_random_ratio=${MIX_RANDOM}")
   ovs+=("--override" "train.hard_negative.tail_to=${TAIL_TO}")

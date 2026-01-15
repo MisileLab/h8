@@ -55,11 +55,13 @@ run_experiment() {
   local lr="0.0005"
   local lr_schedule="cosine"
   local warmup="2000"
-  local amp="none"
+  local amp="${AMP:-none}"
   local dim="128"
   local k="50"
   local false_neg_mode="threshold"
   local false_neg_threshold="0.8"
+  local batch_size="${BATCH_SIZE:-2048}"
+  local max_batch_size="${MAX_BATCH_SIZE:-4096}"
 
   local run_id
   run_id="$(generate_run_id "$exp_name" "$steps" "$seeds" "$tau" "$neg_m" "$queue_size")"
@@ -89,6 +91,7 @@ run_experiment() {
     log "      TRACK_B_QUEUE_SIZE=$queue_size TRACK_B_TAU=$tau TRACK_B_FALSE_NEG_MODE=$false_neg_mode"
     log "      TRACK_B_FALSE_NEG_THRESHOLD=$false_neg_threshold STEPS=$steps SEEDS=$seeds"
     log "      LR=$lr LR_SCHEDULE=$lr_schedule WARMUP_STEPS=$warmup AMP=$amp"
+    log "      BATCH_SIZE=$batch_size MAX_BATCH_SIZE=$max_batch_size"
     log "      RUN_ID=$run_id bash scripts/run_track_a.sh sweep"
     log ""
     echo "$run_id|dry_run|null/null"
@@ -110,6 +113,8 @@ run_experiment() {
     "LR_SCHEDULE=$lr_schedule"
     "WARMUP_STEPS=$warmup"
     "AMP=$amp"
+    "BATCH_SIZE=$batch_size"
+    "MAX_BATCH_SIZE=$max_batch_size"
     "RUN_ID=$run_id"
     "SAVE_EVERY=2000"
     "EVAL_EVERY=1000"
@@ -306,6 +311,13 @@ main() {
         echo "  LR_SCHEDULE=cosine"
         echo "  WARMUP_STEPS=2000"
         echo "  AMP=none"
+        echo ""
+        echo "Batch size environment variables (can override):"
+        echo "  BATCH_SIZE=2048        Initial/target batch size"
+        echo "  MAX_BATCH_SIZE=4096    Maximum batch size for dynamic batching"
+        echo ""
+        echo "Example with custom batch size (60GB VRAM):"
+        echo "  BATCH_SIZE=4096 MAX_BATCH_SIZE=8192 AMP=bf16 bash scripts/run_track_b.sh"
         exit 0
         ;;
     esac
